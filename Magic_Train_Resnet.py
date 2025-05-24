@@ -137,11 +137,11 @@ def train_model_simple(num_epochs=10, val_ratio=0.1):
     
     train_loader = DataLoader(train_subset, batch_size=64, shuffle=True)
     val_loader = DataLoader(val_subset, batch_size=128)
-    
     model = CubeSolverCNN().to(device)
-    criterion = nn.CrossEntropyLoss(weight=weights)  # 使用加權損失
+    criterion = nn.CrossEntropyLoss(weight=weights) 
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
-    
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
+
     train_losses = []
     val_losses = []
     train_accuracies = []
@@ -162,7 +162,6 @@ def train_model_simple(num_epochs=10, val_ratio=0.1):
             total_train_loss += loss.item()
             correct_train += (out.argmax(dim=1) == y).sum().item()
             total_train += y.size(0)
-            train_loop.set_postfix(loss=loss.item())
         
         train_loss = total_train_loss / len(train_loader)
         train_acc = correct_train / total_train
@@ -180,7 +179,6 @@ def train_model_simple(num_epochs=10, val_ratio=0.1):
                 total_val_loss += loss.item()
                 correct_val += (out.argmax(dim=1) == y).sum().item()
                 total_val += y.size(0)
-                train_loop.set_postfix(loss=loss.item())
         
         val_loss = total_val_loss / len(val_loader)
         val_acc = correct_val / total_val
@@ -188,7 +186,8 @@ def train_model_simple(num_epochs=10, val_ratio=0.1):
         val_accuracies.append(val_acc)
         
         print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-        
+        scheduler.step(val_loss) 
+
         if (epoch + 1) % 5 == 0:
             torch.save(model.state_dict(), f'cube_model_epoch_{epoch+1}.pt')
             print(f"Saved model: cube_model_epoch_{epoch+1}.pt")
