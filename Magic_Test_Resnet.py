@@ -4,9 +4,11 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import numpy as np
-from scipy.stats import wasserstein_distance
+import matplotlib.pyplot as plt
 import argparse
-from heapq import heappush 
+from heapq import heappush
+from collections import Counter
+
 # ----------------------
 # Constants
 # ----------------------
@@ -15,6 +17,7 @@ NUM_CLASSES = 18
 MOVE_LABELS = ['U', 'U\'', 'U2', 'D', 'D\'', 'D2', 'L', 'L\'', 'L2', 'R', 'R\'', 'R2', 'F', 'F\'', 'F2', 'B', 'B\'', 'B2']
 MOVE_TO_IDX = {m: i for i, m in enumerate(MOVE_LABELS)}
 IDX_TO_MOVE = {i: m for m, i in MOVE_TO_IDX.items()}
+L, U, F, D, R, B = range(0, 54, 9)  
 
 class CubeDataset(Dataset):
     def __init__(self, folder):
@@ -57,7 +60,7 @@ class CubeDataset(Dataset):
     def __getitem__(self, idx):
         x, y = self.samples[idx]
         return x.view(6, 3, 3), y
-    
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1):
         super(ResidualBlock, self).__init__()
@@ -67,7 +70,6 @@ class ResidualBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(out_channels)
         
-        # 殞差連接的調整層（若輸入輸出通道數不同）
         self.shortcut = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
@@ -82,10 +84,10 @@ class ResidualBlock(nn.Module):
         out = self.relu(out)
         out = self.conv2(out)
         out = self.bn2(out)
-        out += self.shortcut(identity)  # 殞差連接
+        out += self.shortcut(identity)
         out = self.relu(out)
         return out
-    
+
 class CubeSolverCNN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -95,18 +97,16 @@ class CubeSolverCNN(nn.Module):
             nn.ReLU(inplace=True)
         )
         
-        # 添加殞差塊
         self.res_blocks = nn.Sequential(
-            ResidualBlock(64, 64, stride=1),   # 第一個殞差塊，保持 64 通道
-            ResidualBlock(64, 128, stride=1),  # 第二個殞差塊，增加到 128 通道
-            ResidualBlock(128, 256, stride=1)  # 第三個殞差塊，增加到 256 通道
+            ResidualBlock(64, 64, stride=1),
+            ResidualBlock(64, 128, stride=1),
+            ResidualBlock(128, 256, stride=1)
         )
         
         self.flatten = nn.Flatten()
         
-        # MLP 部分，調整輸入維度以匹配殞差塊輸出
         self.mlp = nn.Sequential(
-            nn.Linear(256 * 3 * 3, 512),  # 假設輸入為 3x3，根據實際輸出調整
+            nn.Linear(256 * 3 * 3, 512),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(512, 256),
@@ -116,18 +116,29 @@ class CubeSolverCNN(nn.Module):
         )
     
     def forward(self, x):
+        original_training = self.training
+        if x.size(0) == 1:
+            self.eval()
+            for module in self.modules():
+                if isinstance(module, nn.BatchNorm2d):
+                    module.track_running_stats = False
+        
         x = self.initial_conv(x)
         x = self.res_blocks(x)
         x = self.flatten(x)
         x = self.mlp(x)
+        
+        if x.size(0) == 1:
+            self.train(original_training)
+            for module in self.modules():
+                if isinstance(module, nn.BatchNorm2d):
+                    module.track_running_stats = True
+        
         return x
 
-# ----------------------
-# Accuracy Evaluation
-# ----------------------
 def evaluate_model(model):
     device = next(model.parameters()).device
-    dataset = CubeDataset('seq')
+    dataset = CubeDataset('test')
     loader = DataLoader(dataset, batch_size=128)
     correct, total = 0, 0
     model.eval()
@@ -140,28 +151,13 @@ def evaluate_model(model):
             total += y.size(0)
     print(f"Accuracy: {correct / total * 100:.2f}%")
 
-# ----------------------
-# Diffusion Distance
-# ----------------------
 def diffusion_distance(state):
     solved_state = [i//9 for i in range(54)]
-    state_dist = []
-    solved_dist = []
-    for face in range(6):
-        state_face = state[face*9:(face+1)*9]
-        solved_face = solved_state[face*9:(face+1)*9]
-        state_counts = np.bincount(state_face, minlength=6)
-        solved_counts = np.bincount(solved_face, minlength=6)
-        state_dist.append(state_counts / 9.0)
-        solved_dist.append(solved_counts / 9.0)
-    total_distance = 0
-    for s_dist, sol_dist in zip(state_dist, solved_dist):
-        total_distance += wasserstein_distance(np.arange(6), np.arange(6), s_dist, sol_dist)
-    return total_distance
+    mismatches = sum(1 for s, t in zip(state, solved_state) if s != t)
+    cross_penalty = sum(1 for i in [12, 13, 14] if state[i] != state[13]) / 4.0  # U face: 9-17
+    corner_penalty = sum(1 for i in [9, 11, 15, 17] if state[i] != state[13]) / 4.0
+    return 0.5 * (mismatches / 54.0) + 0.3 * cross_penalty + 0.2 * corner_penalty
 
-# ----------------------
-# Inference
-# ----------------------
 def predict_move(model, state):
     device = next(model.parameters()).device
     model.eval()
@@ -171,9 +167,6 @@ def predict_move(model, state):
         pred = torch.argmax(logits, dim=1).item()
         return IDX_TO_MOVE[pred]
 
-# ----------------------
-# Helper Functions for State Update
-# ----------------------
 def rotate_face(face, direction='clockwise'):
     if direction == 'clockwise':
         return [face[6], face[3], face[0], face[7], face[4], face[1], face[8], face[5], face[2]]
@@ -182,32 +175,41 @@ def rotate_face(face, direction='clockwise'):
 
 def apply_move(state, move):
     new_state = state.copy()
-    U, D, L, R, F, B = range(0, 54, 9)
     
     if move == 'U':
         new_state[U:U+9] = rotate_face(state[U:U+9], 'clockwise')
         new_state[F:F+3], new_state[R:R+3], new_state[B:B+3], new_state[L:L+3] = \
-            state[L:L+3], state[F:F+3], state[R:R+3], state[B:B+3]
+            state[R:R+3], state[B:B+3], state[L:L+3], state[F:F+3]
     elif move == 'U\'':
         new_state[U:U+9] = rotate_face(state[U:U+9], 'counterclockwise')
-        new_state[L:L+3], new_state[B:B+3], new_state[R:R+3], new_state[F:F+3] = \
-            state[F:F+3], state[R:R+3], state[B:B+3], state[L:L+3]
+        new_state[F:F+3], new_state[R:R+3], new_state[B:B+3], new_state[L:L+3] = \
+            state[L:L+3], state[F:F+3], state[R:R+3], state[B:B+3]
     elif move == 'U2':
         new_state[U:U+9] = rotate_face(rotate_face(state[U:U+9], 'clockwise'), 'clockwise')
-        new_state[F:F+3], new_state[L:L+3], new_state[R:R+3], new_state[B:B+3] = \
-            state[R:R+3], state[B:B+3], state[L:L+3], state[F:F+3]
+        new_state[F:F+3], new_state[R:R+3], new_state[B:B+3], new_state[L:L+3] = \
+            state[B:B+3], state[L:L+3], state[F:F+3], state[R:R+3]
     elif move == 'D':
         new_state[D:D+9] = rotate_face(state[D:D+9], 'clockwise')
-        new_state[F+6:F+9], new_state[L+6:L+9], new_state[R+6:R+9], new_state[B+6:B+9] = \
-            state[R+6:R+9], state[F+6:F+9], state[B+6:B+9], state[L+6:L+9]
+        temp = state[F+6:F+9]
+        new_state[F+6:F+9] = state[L+6:L+9]
+        new_state[L+6:L+9] = state[B+6:B+9]
+        new_state[B+6:B+9] = state[R+6:R+9]
+        new_state[R+6:R+9] = temp
     elif move == 'D\'':
         new_state[D:D+9] = rotate_face(state[D:D+9], 'counterclockwise')
-        new_state[R+6:R+9], new_state[F+6:F+9], new_state[B+6:B+9], new_state[L+6:L+9] = \
-            state[F+6:F+9], state[L+6:L+9], state[R+6:R+9], state[B+6:B+9]
+        temp = state[F+6:F+9]
+        new_state[F+6:F+9] = state[R+6:R+9]
+        new_state[R+6:R+9] = state[B+6:B+9]
+        new_state[B+6:B+9] = state[L+6:L+9]
+        new_state[L+6:L+9] = temp
     elif move == 'D2':
         new_state[D:D+9] = rotate_face(rotate_face(state[D:D+9], 'clockwise'), 'clockwise')
-        new_state[F+6:F+9], new_state[R+6:R+9], new_state[L+6:L+9], new_state[B+6:B+9] = \
-            state[L+6:L+9], state[B+6:B+9], state[F+6:F+9], state[R+6:R+9]
+        temp1 = state[F+6:F+9]
+        temp2 = state[R+6:R+9]
+        new_state[F+6:F+9] = state[B+6:B+9]
+        new_state[R+6:R+9] = state[L+6:L+9]
+        new_state[B+6:B+9] = temp1
+        new_state[L+6:L+9] = temp2
     elif move == 'L':
         new_state[L:L+9] = rotate_face(state[L:L+9], 'clockwise')
         temp = [state[U+0], state[U+3], state[U+6]]
@@ -306,14 +308,93 @@ def is_solved(state):
             return False
     return True
 
-# ----------------------
-# Beam Search with Diffusion Distance
-# ----------------------
-def simulate_full_solve_beam(model, state, max_steps=50, beam_width=3, alpha=0.5):
+def simplify_move_sequence(moves):
+    if not moves:
+        return []
+    
+    simplified = []
+    i = 0
+    faces = ['U', 'D', 'L', 'R', 'F', 'B']
+    
+    while i < len(moves):
+        if i + 1 < len(moves):
+            curr_move = moves[i]
+            next_move = moves[i + 1]
+            curr_face = curr_move.rstrip("'2")
+            next_face = next_move.rstrip("'2")
+            
+            if curr_face == next_face and (
+                (curr_move == curr_face and next_move == curr_face + "'") or
+                (curr_move == curr_face + "'" and next_move == curr_face)
+            ):
+                i += 2
+                continue
+            
+            if curr_face == next_face and curr_move == next_move and curr_move in [curr_face, curr_face + "'"]:
+                simplified.append(curr_face + "2")
+                i += 2
+                continue
+            
+            if curr_face == next_face and curr_move == curr_face + "2" and next_move == curr_face + "2":
+                i += 2
+                continue
+        
+        if i + 2 < len(moves):
+            curr_move = moves[i]
+            next_move = moves[i + 1]
+            next_next_move = moves[i + 2]
+            curr_face = curr_move.rstrip("'2")
+            if curr_move == next_move == next_next_move and curr_move in [curr_face, curr_face + "'"]:
+                simplified.append(curr_face + "'" if curr_move == curr_face else curr_face)
+                i += 3
+                continue
+        
+        if i + 1 < len(moves):
+            curr_move = moves[i]
+            next_move = moves[i + 1]
+            curr_face = curr_move.rstrip("'2")
+            next_face = next_move.rstrip("'2")
+            if curr_face == next_face and (
+                (curr_move == curr_face + "2" and next_move == curr_face) or
+                (curr_move == curr_face and next_move == curr_face + "2")
+            ):
+                simplified.append(curr_face + "'")
+                i += 2
+                continue
+            if curr_face == next_face and (
+                (curr_move == curr_face + "2" and next_move == curr_face + "'") or
+                (curr_move == curr_face + "'" and next_move == curr_face + "2")
+            ):
+                simplified.append(curr_face)
+                i += 2
+                continue
+        
+        if i + 2 < len(moves):
+            curr_move = moves[i]
+            next_move = moves[i + 1]
+            next_next_move = moves[i + 2]
+            curr_face = curr_move.rstrip("'2")
+            if curr_move == curr_face and next_move == curr_face + "'" and next_next_move == curr_face:
+                simplified.append(curr_face)
+                i += 3
+                continue
+        
+        simplified.append(moves[i])
+        i += 1
+    
+    if simplified != moves:
+        return simplify_move_sequence(simplified)
+    return simplified
+
+def simulate_full_solve_beam(model, state, max_steps=2, beam_width=10, alpha=0.6):
     print("Start solving...")
     device = next(model.parameters()).device
     initial_dist = diffusion_distance(state)
     beams = [(0.0, state.copy(), [])]
+    
+    scores = []
+    distances = []
+    seen_states = set()
     
     for step in range(max_steps):
         new_beams = []
@@ -326,7 +407,27 @@ def simulate_full_solve_beam(model, state, max_steps=50, beam_width=3, alpha=0.5
             
             for p, a in zip(top_probs, top_actions):
                 action = IDX_TO_MOVE[a.item()]
-                new_state = apply_move(current_state, action)
+                
+                new_history = simplify_move_sequence(move_history + [action])
+                if not new_history:
+                    continue
+                if new_history == move_history:
+                    new_history = move_history + [action]
+                
+                new_state = current_state
+                for move in new_history[len(move_history):]:
+                    new_state = apply_move(new_state, move)
+                
+                state_hash = tuple(new_state)
+                if state_hash in seen_states:
+                    continue
+                seen_states.add(state_hash)
+                
+                print(f"After move {action}:")
+                state_tensor = np.array(new_state).reshape(6, 3, 3)
+                for i, face in enumerate(['L', 'U', 'F', 'D', 'R', 'B']):
+                    print(f"Face {face}:\n{state_tensor[i]}")
+                
                 new_dist = diffusion_distance(new_state)
                 
                 dist_score = new_dist / (initial_dist + 1e-6)
@@ -335,24 +436,45 @@ def simulate_full_solve_beam(model, state, max_steps=50, beam_width=3, alpha=0.5
                 
                 if is_solved(new_state):
                     print("Solved!")
-                    print(f"Solution sequence: {' '.join(move_history + [action])}")
-                    print(f"Steps: {len(move_history) + 1}")
-                    return move_history + [action]
+                    print(f"Solution sequence: {' '.join(new_history)}")
+                    print(f"Steps: {len(new_history)}")
+                    scores.append(new_score)
+                    distances.append(new_dist)
+                    return new_history, scores, distances
                 
-                heappush(new_beams, (new_score, new_state, move_history + [action]))
+                if len(new_history) >= 4:
+                    if new_history[-4:] == [new_history[-1]] * 4:
+                        print(f"Skipping repetitive move: {new_history[-4:]}")
+                        continue
+                    if new_history[-4:] in [
+                        [new_history[-4], new_history[-3], new_history[-4], new_history[-3]],
+                        [new_history[-3], new_history[-4], new_history[-3], new_history[-4]]
+                    ] and new_history[-4] in [new_history[-3].replace("'", "") + "'", new_history[-3].replace("'", "")] + [new_history[-3] + "2"]:
+                        print(f"Skipping alternating pattern: {new_history[-4:]}")
+                        continue
+                
+                heappush(new_beams, (new_score, new_state, new_history))
         
         beams = new_beams[:beam_width]
-        print(f"Step {step + 1}: Best sequence: {' '.join(beams[0][2])}, Distance: {diffusion_distance(beams[0][1]):.4f}")
+        if beams:
+            scores.append(beams[0][0])
+            distances.append(diffusion_distance(beams[0][1]))
+            print(f"Step {step + 1}: Best sequence: {' '.join(beams[0][2])}, Distance: {distances[-1]:.4f}, Score: {scores[-1]:.4f}")
+        else:
+            print("All beams filtered due to cycles, stopping.")
+            break
         
-        for _, _, history in beams:
-            if len(history) >= 4 and history[-4:] == [history[-1]] * 4:
-                print("Cycle detected in a beam, continuing with other beams...")
-                beams = [b for b in beams if b[2][-4:] != [b[2][-1]] * 4]
-                if not beams:
-                    print("All beams in cycle, stopping.")
-                    break
-        
+        beams = [b for b in beams if not (
+            len(b[2]) >= 4 and (
+                b[2][-4:] == [b[2][-1]] * 4 or
+                (b[2][-4:] in [
+                    [b[2][-4], b[2][-3], b[2][-4], b[2][-3]],
+                    [b[2][-3], b[2][-4], b[2][-3], b[2][-4]]
+                ] and b[2][-4] in [b[2][-3].replace("'", "") + "'", b[2][-3].replace("'", "")] + [b[2][-3] + "2"])
+            )
+        )]
         if not beams:
+            print("All beams in cycle, stopping.")
             break
     
     print("Max steps reached. Could not solve fully.")
@@ -360,10 +482,10 @@ def simulate_full_solve_beam(model, state, max_steps=50, beam_width=3, alpha=0.5
         _, _, best_history = beams[0]
         print(f"Best attempted sequence: {' '.join(best_history)}")
         print(f"Final distance: {diffusion_distance(beams[0][1]):.4f}")
-        return best_history
+        return best_history, scores, distances
     else:
         print("No valid sequences found.")
-        return []
+        return [], scores, distances
 
 # ----------------------
 # Main
@@ -378,7 +500,6 @@ if __name__ == '__main__':
     
     model = CubeSolverCNN().to(device)
     
-    # Load the trained model
     try:
         model.load_state_dict(torch.load(args.model_path, map_location=device))
         print(f"Loaded model from {args.model_path}")
@@ -386,17 +507,35 @@ if __name__ == '__main__':
         print(f"Error loading model from {args.model_path}: {e}")
         exit(1)
     
-    # Ensure model is in evaluation mode and check BatchNorm2d running stats
     model.eval()
     for name, module in model.named_modules():
         if isinstance(module, nn.BatchNorm2d):
             print(f"BatchNorm2d layer '{name}' training mode: {module.training}")
             if module.running_mean is None or module.running_var is None:
                 print(f"Warning: BatchNorm2d layer '{name}' has uninitialized running stats. Consider re-training the model.")
-    # Evaluate model accuracy
-    # evaluate_model(model)
+
+    evaluate_model(model)
+
+    # Sample state reordered for L, U, F, D, R, B
+    sample_state = [2, 0, 5, 2, 0, 5, 3, 5, 1, 0, 3, 0, 3, 1, 5, 0, 3, 4, 3, 5, 5, 1, 2, 2, 4, 4, 0, 2, 1, 2, 4, 3, 4, 4, 0, 4, 1, 0, 1, 3, 4, 1, 1, 2, 3, 5, 4, 3, 2, 5, 0, 2, 1, 5]
+    print("Verifying sample state:", Counter(sample_state))  # Should be {0: 9, 1: 9, 2: 9, 3: 0, 4: 9, 5: 9}
     
-    # Test with a sample state
+    result, scores, distances = simulate_full_solve_beam(model, sample_state, max_steps=100, beam_width=18, alpha=0.2)
     
-    sample_state = [2,0,5,2,0,5,3,5,1,0,3,0,3,1,5,0,3,4,3,5,5 ,1 ,2 ,2 ,4 ,4 ,0 ,2 ,1 ,2 ,4 ,3 ,4 ,4 ,0 ,4 ,1 ,0 ,1 ,3 ,4 ,1 ,1 ,2 ,3 ,5 ,4 ,3 ,2 ,5 ,0 ,2 ,1 ,5]
-    simulate_full_solve_beam(model, sample_state, max_steps=100, beam_width=3, alpha=0.6)
+    if not scores or not distances:
+        print("Warning: No data to plot. Scores and distances lists are empty.")
+    else:
+        plt.figure(figsize=(10, 5))
+        plt.subplot(1, 2, 1)
+        plt.plot(scores, label='Score')
+        plt.xlabel('Step')
+        plt.ylabel('Score')
+        plt.legend()
+        plt.subplot(1, 2, 2)
+        plt.plot(distances, label='Distance')
+        plt.xlabel('Step')
+        plt.ylabel('Distance')
+        plt.legend()
+        plt.savefig('search_metrics.png')
+        plt.close()
+        print("Generated search_metrics.png with Score and Distance plots.")
