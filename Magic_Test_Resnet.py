@@ -9,7 +9,6 @@ import argparse
 from heapq import heappush
 from collections import Counter
 
-# Add visualization imports
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import imageio
 
@@ -717,7 +716,7 @@ if __name__ == '__main__':
         exit(1)
     
     model.eval()
-    evaluate_model(model)
+    # evaluate_model(model)
 
     # Sample state from Magic_Test_Resnet.py
     sample_state = SAMPLE_STATE
