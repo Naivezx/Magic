@@ -1,6 +1,6 @@
 __pycache__/
 model_Basic/
-model_Restnet/
+model_Resnet/
 model_3D/
 photo/
 photo_sovle/
