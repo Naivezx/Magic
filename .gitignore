@@ -1,6 +1,5 @@
 archive/
 dataset/
-*.pt
 Dataset_Balance.py
 
 * text=auto
