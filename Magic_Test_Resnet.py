@@ -717,6 +717,7 @@ if __name__ == '__main__':
         exit(1)
     
     model.eval()
+    evaluate_model(model)
 
     # Sample state from Magic_Test_Resnet.py
     sample_state = SAMPLE_STATE

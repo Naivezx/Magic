@@ -1,5 +1,11 @@
 archive/
-dataset/
+modeL_Basic/
+model_Restnet/
+model_3D/
+photo/
+photo_sovle/
+photo_loss_acc/
 Dataset_Balance.py
-
+*h5
+*pt
 * text=auto
