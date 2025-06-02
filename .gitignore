@@ -1,4 +1,4 @@
-archive/
+__pycache__/
 model_Basic/
 model_Restnet/
 model_3D/
@@ -14,4 +14,3 @@ Test.py
 *.h5
 *.pt
 *.png
-* text=auto

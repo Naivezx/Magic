@@ -1,15 +1,14 @@
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+from heapq import heappush
+from collections import Counter
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import os
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 import argparse
-from heapq import heappush
-from collections import Counter
-
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import imageio
 
 SAMPLE_STATE = [4, 0, 2, 3, 0, 2, 1, 5, 0, 3, 1, 2, 1, 1, 2, 1, 5, 2, 4, 0, 0, 4, 2, 1, 1, 0, 5, 2, 2, 1, 1, 3, 5, 0, 3, 5, 3, 3, 3, 4, 4, 3, 4, 4, 0, 4, 2, 5, 5, 5, 4, 3, 0, 5]
